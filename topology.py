@@ -1,75 +1,123 @@
+#!/usr/bin/env python3
+
 from mininet.net import Mininet
-from mininet.node import RemoteController
+from mininet.node import RemoteController, OVSSwitch
 from mininet.link import TCLink
 from mininet.cli import CLI
+from mininet.log import setLogLevel, info
+import sys
 
 def custom_tree_topology():
-    """Create a custom tree-based topology."""
-    net = Mininet(controller=RemoteController, link=TCLink)
+    """
+    Create a custom tree-based topology with three layers:
+    - Core Layer (1 switch)
+    - Aggregation Layer (2 switches)
+    - Access Layer (4 switches)
+    - 8 hosts total (4 in each subnet)
+    """
+    try:
+        # Initialize Mininet with RemoteController and TCLink
+        net = Mininet(
+            controller=RemoteController,
+            switch=OVSSwitch,
+            link=TCLink,
+            autoSetMacs=True
+        )
 
-    # Add the Ryu controller
-    ryu_controller = net.addController(
-        'ryuController',
-        controller=RemoteController,
-        ip='10.0.2.15',  # IP address of the machine running the Ryu controller
-        port=6633  # Default OpenFlow port
-    )
+        info('*** Adding controller\n')
+        controller = net.addController(
+            name='ryuController',
+            controller=RemoteController,
+            ip='10.0.2.15',  # Using localhost for development
+            port=6633
+        )
 
-    # Add core switch
-    core_switch = net.addSwitch('s1')
+        info('*** Adding switches\n')
+        # Core layer
+        core = net.addSwitch('s1', protocols='OpenFlow13')
+        
+        # Aggregation layer
+        aggr = [
+            net.addSwitch(f's{i}', protocols='OpenFlow13')
+            for i in range(2, 4)
+        ]
+        
+        # Access layer
+        access = [
+            net.addSwitch(f's{i}', protocols='OpenFlow13')
+            for i in range(4, 8)
+        ]
 
-    # Add aggregation layer switches
-    agg_switch1 = net.addSwitch('s2')
-    agg_switch2 = net.addSwitch('s3')
+        info('*** Adding hosts\n')
+        # First subnet (10.0.0.0/24)
+        hosts_subnet1 = [
+            net.addHost(
+                f'h{i}',
+                ip=f'10.0.0.{i}/24',
+                defaultRoute='via 10.0.0.254'
+            )
+            for i in range(1, 5)
+        ]
+        
+        # Second subnet (10.0.1.0/24)
+        hosts_subnet2 = [
+            net.addHost(
+                f'h{i}',
+                ip=f'10.0.1.{i-4}/24',
+                defaultRoute='via 10.0.1.254'
+            )
+            for i in range(5, 9)
+        ]
 
-    # Add access layer switches
-    access_switch1 = net.addSwitch('s4')
-    access_switch2 = net.addSwitch('s5')
-    access_switch3 = net.addSwitch('s6')
-    access_switch4 = net.addSwitch('s7')
+        info('*** Creating links\n')
+        # Core to Aggregation links
+        for sw in aggr:
+            net.addLink(
+                core, sw,
+                bw=50,
+                delay='2ms',
+                loss=0,
+                use_htb=True
+            )
 
-    # Interconnect core and aggregation switches
-    net.addLink(core_switch, agg_switch1, bw=50, delay='2ms', use_htb=True)
-    net.addLink(core_switch, agg_switch2, bw=50, delay='2ms', use_htb=True)
+        # Aggregation to Access links
+        net.addLink(aggr[0], access[0], bw=30, delay='5ms', use_htb=True)
+        net.addLink(aggr[0], access[1], bw=30, delay='5ms', use_htb=True)
+        net.addLink(aggr[1], access[2], bw=30, delay='5ms', use_htb=True)
+        net.addLink(aggr[1], access[3], bw=30, delay='5ms', use_htb=True)
 
-    # Interconnect aggregation and access switches
-    net.addLink(agg_switch1, access_switch1, bw=30, delay='5ms', use_htb=True)
-    net.addLink(agg_switch1, access_switch2, bw=30, delay='5ms', use_htb=True)
-    net.addLink(agg_switch2, access_switch3, bw=30, delay='5ms', use_htb=True)
-    net.addLink(agg_switch2, access_switch4, bw=30, delay='5ms', use_htb=True)
+        # Connect hosts to access switches
+        for i, host in enumerate(hosts_subnet1):
+            sw_index = i // 2
+            net.addLink(host, access[sw_index], bw=10, delay='1ms', use_htb=True)
 
-    # Add hosts to access layer switches
-    host1 = net.addHost('h1', ip='10.0.0.1/24')
-    host2 = net.addHost('h2', ip='10.0.0.2/24')
-    host3 = net.addHost('h3', ip='10.0.0.3/24')
-    host4 = net.addHost('h4', ip='10.0.0.4/24')
-    host5 = net.addHost('h5', ip='10.0.1.1/24')
-    host6 = net.addHost('h6', ip='10.0.1.2/24')
-    host7 = net.addHost('h7', ip='10.0.1.3/24')
-    host8 = net.addHost('h8', ip='10.0.1.4/24')
+        for i, host in enumerate(hosts_subnet2):
+            sw_index = (i // 2) + 2
+            net.addLink(host, access[sw_index], bw=10, delay='1ms', use_htb=True)
 
-    # Connect hosts to access layer switches
-    net.addLink(host1, access_switch1)
-    net.addLink(host2, access_switch1)
-    net.addLink(host3, access_switch2)
-    net.addLink(host4, access_switch2)
-    net.addLink(host5, access_switch3)
-    net.addLink(host6, access_switch3)
-    net.addLink(host7, access_switch4)
-    net.addLink(host8, access_switch4)
+        info('*** Starting network\n')
+        net.build()
+        controller.start()
+        
+        # Start all switches
+        for switch in net.switches:
+            switch.start([controller])
 
-    # Start the network
-    net.start()
-    print("Custom tree-based topology is up. Use 'pingall' in the CLI to test connectivity.")
+        info('*** Running basic connectivity tests\n')
+        net.pingAll()
 
-    # Test connectivity automatically
-    net.pingAll()
+        info('*** Running CLI\n')
+        CLI(net)
 
-    # Enter the Mininet CLI
-    CLI(net)
-
-    # Stop the network
-    net.stop()
+    except Exception as e:
+        info(f'*** Error: {str(e)}\n')
+        sys.exit(1)
+    
+    finally:
+        info('*** Stopping network\n')
+        if 'net' in locals():
+            net.stop()
 
 if __name__ == '__main__':
+    setLogLevel('info')
     custom_tree_topology()
